@@ -1,0 +1,9 @@
+cff-version: 1.2.0
+message: "If you want to cite this project, use the repository link below."
+title: "learn-claude-code"
+type: software
+authors:
+  - name: "xielixing"
+repository-code: "https://github.com/xielixing/learn-claude-code"
+url: "https://github.com/xielixing/learn-claude-code"
+license: MIT
