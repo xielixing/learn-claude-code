@@ -3,6 +3,8 @@ import sys
 from collections.abc import Callable, Mapping
 from typing import Any, TextIO
 
+from mini_agent import ToolRegistry
+from mini_agent.tools import read_file_tool
 from .clients import AnthropicModelClient, OpenAIChatModelClient, merged_env
 from .engine import ModelReply, QueryEngine
 
@@ -66,6 +68,13 @@ def build_model(args: argparse.Namespace, provider: str) -> Any:
         )
     raise ValueError(f"Unsupported provider: {provider}")
 
+def build_tools() -> ToolRegistry:
+    return ToolRegistry([read_file_tool(".")])
+
+def format_usage(usage: dict[str, int]) -> str:
+    keys = ["input_tokens", "output_tokens", "total_tokens"]
+    parts = [f"{key}={usage[key]}" for key in keys if key in usage]
+    return " ".join(parts)
 
 def print_events(events: list[dict[str, Any]], output: TextIO = sys.stdout) -> None:
     for event in events:
@@ -75,6 +84,9 @@ def print_events(events: list[dict[str, Any]], output: TextIO = sys.stdout) -> N
                     print(block["text"], file=output)
                 elif block.get("type") == "tool_use":
                     print(f"[tool] {block['name']} {block.get('input', {})}", file=output)
+            usage_text = format_usage(event.get("usage", {}))
+            if usage_text:
+                print(f"[usage] {usage_text}", file=output)
         elif event["type"] == "tool_results":
             for block in event["content"]:
                 print(f"[tool result] {block['content']}", file=output)
@@ -172,7 +184,11 @@ def main(argv: list[str] | None = None) -> None:
 
     try:
         provider = resolve_provider(args)
-        engine = QueryEngine(model=build_model(args, provider), system_prompt=args.system)
+        engine = QueryEngine(
+            model=build_model(args, provider),
+            tools=build_tools(),
+            system_prompt=args.system
+        )
         if args.prompt is None:
             run_repl(engine, provider=provider, model=args.model)
         else:
