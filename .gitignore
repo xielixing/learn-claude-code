@@ -30,6 +30,7 @@ dist/
 *.key
 
 # Local app/runtime output
+cli.exe
 *.log
 logs/
 tmp/
