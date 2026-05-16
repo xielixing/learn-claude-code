@@ -1,5 +1,6 @@
 import json
 import os
+import tomllib
 from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
@@ -38,18 +39,58 @@ def load_claude_code_env(config_dir: Path | str | None = None) -> dict[str, str]
     return loaded
 
 
+def codex_config_dir(environ: Mapping[str, str] | None = None) -> Path:
+    env = environ or os.environ
+    configured = env.get("CODEX_HOME") or env.get("CODEX_CONFIG_DIR")
+    if configured:
+        return Path(configured).expanduser()
+    return Path.home() / ".codex"
+
+
+def load_codex_env(config_dir: Path | str | None = None) -> dict[str, str]:
+    base = Path(config_dir).expanduser() if config_dir else codex_config_dir()
+    loaded: dict[str, str] = {}
+
+    auth_path = base / "auth.json"
+    if auth_path.exists():
+        data = json.loads(auth_path.read_text(encoding="utf-8-sig"))
+        api_key = data.get("OPENAI_API_KEY")
+        if api_key:
+            loaded["OPENAI_API_KEY"] = str(api_key)
+
+    config_path = base / "config.toml"
+    if config_path.exists():
+        data = tomllib.loads(config_path.read_text(encoding="utf-8-sig"))
+        if data.get("model"):
+            loaded["OPENAI_MODEL"] = str(data["model"])
+
+        provider_name = data.get("model_provider")
+        providers = data.get("model_providers", {})
+        provider = providers.get(provider_name, {}) if isinstance(providers, dict) else {}
+        if isinstance(provider, dict):
+            if provider.get("base_url"):
+                loaded["OPENAI_BASE_URL"] = str(provider["base_url"])
+            if provider.get("wire_api"):
+                loaded["OPENAI_WIRE_API"] = str(provider["wire_api"])
+
+    if loaded:
+        loaded["CODEX_CONFIG_LOADED"] = "1"
+    return loaded
+
+
 def merged_env(
     *,
     environ: Mapping[str, str] | None = None,
+    use_codex_config: bool = True,
+    codex_config_dir: Path | str | None = None,
     use_claude_code_config: bool = True,
     claude_config_dir: Path | str | None = None,
 ) -> dict[str, str]:
     process_env = dict(environ or os.environ)
-    if not use_claude_code_config:
-        return process_env
+    claude_env = load_claude_code_env(claude_config_dir) if use_claude_code_config else {}
+    codex_env = load_codex_env(codex_config_dir) if use_codex_config else {}
 
-    config_env = load_claude_code_env(claude_config_dir)
-    return {**config_env, **process_env}
+    return {**claude_env, **process_env, **codex_env}
 
 
 @dataclass
@@ -58,12 +99,16 @@ class AnthropicModelClient:
     max_tokens: int = 1024
     client: Any | None = None
     environ: Mapping[str, str] | None = None
+    use_codex_config: bool = True
+    codex_config_dir: Path | str | None = None
     use_claude_code_config: bool = True
     claude_config_dir: Path | str | None = None
 
     def __post_init__(self) -> None:
         env = merged_env(
             environ=self.environ,
+            use_codex_config=self.use_codex_config,
+            codex_config_dir=self.codex_config_dir,
             use_claude_code_config=self.use_claude_code_config,
             claude_config_dir=self.claude_config_dir,
         )
@@ -103,18 +148,24 @@ class AnthropicModelClient:
 class OpenAIChatModelClient:
     model: str | None = None
     max_tokens: int | None = 1024
+    wire_api: str | None = None
     client: Any | None = None
     environ: Mapping[str, str] | None = None
+    use_codex_config: bool = True
+    codex_config_dir: Path | str | None = None
     use_claude_code_config: bool = True
     claude_config_dir: Path | str | None = None
 
     def __post_init__(self) -> None:
         env = merged_env(
             environ=self.environ,
+            use_codex_config=self.use_codex_config,
+            codex_config_dir=self.codex_config_dir,
             use_claude_code_config=self.use_claude_code_config,
             claude_config_dir=self.claude_config_dir,
         )
         self.model = self.model or env.get("OPENAI_MODEL")
+        self.wire_api = (self.wire_api or env.get("OPENAI_WIRE_API") or "chat").lower()
 
         if self.client is None:
             self.client = _new_openai_client(env)
@@ -128,6 +179,24 @@ class OpenAIChatModelClient:
     ) -> ModelReply:
         if not self.model:
             raise ValueError("OpenAI model is not configured. Set --model or OPENAI_MODEL.")
+
+        if self.wire_api == "responses":
+            kwargs: dict[str, Any] = {
+                "model": self.model,
+                "input": _openai_response_input(messages),
+            }
+            if system:
+                kwargs["instructions"] = system
+            if tools:
+                kwargs["tools"] = [_openai_response_tool(tool) for tool in tools]
+            if self.max_tokens is not None:
+                kwargs["max_output_tokens"] = self.max_tokens
+
+            response = self.client.responses.create(**kwargs)
+            return ModelReply(
+                content=_openai_response_content(response),
+                usage=_usage_dict(getattr(response, "usage", None)),
+            )
 
         kwargs: dict[str, Any] = {
             "model": self.model,
@@ -319,6 +388,124 @@ def _openai_tool(tool: dict[str, Any]) -> dict[str, Any]:
             "parameters": tool.get("input_schema", {"type": "object"}),
         },
     }
+
+
+def _openai_response_input(messages: list[Message]) -> list[dict[str, Any]]:
+    converted: list[dict[str, Any]] = []
+    for message in messages:
+        if message.role == "user":
+            converted.extend(_openai_response_user_items(message.content))
+        elif message.role == "assistant":
+            converted.extend(_openai_response_assistant_items(message.content))
+        elif message.role == "system":
+            converted.append({"role": "system", "content": _content_text(message.content)})
+        else:
+            raise ValueError(f"Unsupported message role: {message.role}")
+    return converted
+
+
+def _openai_response_user_items(content: Any) -> list[dict[str, Any]]:
+    if not isinstance(content, list):
+        return [{"role": "user", "content": _content_text(content)}]
+
+    converted: list[dict[str, Any]] = []
+    text_parts: list[str] = []
+    for block in content:
+        if not isinstance(block, dict):
+            text_parts.append(_content_text(block))
+            continue
+
+        if block.get("type") == "tool_result":
+            if text_parts:
+                converted.append({"role": "user", "content": "\n".join(text_parts)})
+                text_parts = []
+            converted.append(
+                {
+                    "type": "function_call_output",
+                    "call_id": block["tool_use_id"],
+                    "output": _content_text(block.get("content", "")),
+                }
+            )
+        elif block.get("type") == "text":
+            text_parts.append(str(block.get("text", "")))
+        else:
+            text_parts.append(json.dumps(block, ensure_ascii=False))
+
+    if text_parts:
+        converted.append({"role": "user", "content": "\n".join(text_parts)})
+    return converted
+
+
+def _openai_response_assistant_items(content: Any) -> list[dict[str, Any]]:
+    if not isinstance(content, list):
+        return [{"role": "assistant", "content": _content_text(content)}]
+
+    converted: list[dict[str, Any]] = []
+    text_parts: list[str] = []
+    for block in content:
+        if not isinstance(block, dict):
+            text_parts.append(_content_text(block))
+            continue
+
+        if block.get("type") == "tool_use":
+            if text_parts:
+                converted.append({"role": "assistant", "content": "\n".join(text_parts)})
+                text_parts = []
+            converted.append(
+                {
+                    "type": "function_call",
+                    "call_id": block["id"],
+                    "name": block["name"],
+                    "arguments": json.dumps(block.get("input", {})),
+                }
+            )
+        elif block.get("type") == "text":
+            text_parts.append(str(block.get("text", "")))
+
+    if text_parts:
+        converted.append({"role": "assistant", "content": "\n".join(text_parts)})
+    return converted
+
+
+def _openai_response_tool(tool: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "type": "function",
+        "name": tool["name"],
+        "description": tool.get("description", ""),
+        "parameters": tool.get("input_schema", {"type": "object"}),
+    }
+
+
+def _openai_response_content(response: Any) -> list[dict[str, Any]]:
+    content: list[dict[str, Any]] = []
+    for item in getattr(response, "output", None) or []:
+        dumped = _dump_sdk_object(item)
+        item_type = dumped.get("type")
+        if item_type == "message":
+            for block in dumped.get("content", []):
+                block_type = block.get("type") if isinstance(block, dict) else None
+                if block_type in {"output_text", "text"} and block.get("text"):
+                    content.append({"type": "text", "text": block["text"]})
+        elif item_type == "function_call":
+            arguments = dumped.get("arguments") or "{}"
+            try:
+                parsed_arguments = json.loads(arguments)
+            except json.JSONDecodeError:
+                parsed_arguments = {"_raw": arguments}
+            content.append(
+                {
+                    "type": "tool_use",
+                    "id": dumped.get("call_id") or dumped.get("id"),
+                    "name": dumped["name"],
+                    "input": parsed_arguments,
+                }
+            )
+
+    if not any(block.get("type") == "text" for block in content):
+        output_text = getattr(response, "output_text", None)
+        if output_text:
+            content.insert(0, {"type": "text", "text": output_text})
+    return content
 
 
 def _openai_reply_content(message: Any) -> list[dict[str, Any]]:

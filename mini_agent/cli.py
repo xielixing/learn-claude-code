@@ -24,9 +24,14 @@ def resolve_provider(args: argparse.Namespace, environ: Mapping[str, str] | None
 
     env = merged_env(
         environ=environ,
-        use_claude_code_config=not args.no_claude_code_config,
-        claude_config_dir=args.claude_config_dir,
+        use_codex_config=not getattr(args, "no_codex_config", False),
+        codex_config_dir=getattr(args, "codex_config_dir", None),
+        use_claude_code_config=not getattr(args, "no_claude_code_config", False),
+        claude_config_dir=getattr(args, "claude_config_dir", None),
     )
+    if env.get("CODEX_CONFIG_LOADED") and env.get("OPENAI_API_KEY"):
+        return "openai"
+
     has_anthropic_credentials = any(
         env.get(name)
         for name in ("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "CLAUDE_CODE_OAUTH_TOKEN")
@@ -45,15 +50,19 @@ def build_model(args: argparse.Namespace, provider: str) -> Any:
         return AnthropicModelClient(
             model=args.model,
             max_tokens=args.max_tokens,
-            use_claude_code_config=not args.no_claude_code_config,
-            claude_config_dir=args.claude_config_dir,
+            use_codex_config=not getattr(args, "no_codex_config", False),
+            codex_config_dir=getattr(args, "codex_config_dir", None),
+            use_claude_code_config=not getattr(args, "no_claude_code_config", False),
+            claude_config_dir=getattr(args, "claude_config_dir", None),
         )
     if provider == "openai":
         return OpenAIChatModelClient(
             model=args.model,
             max_tokens=args.max_tokens,
-            use_claude_code_config=not args.no_claude_code_config,
-            claude_config_dir=args.claude_config_dir,
+            use_codex_config=not getattr(args, "no_codex_config", False),
+            codex_config_dir=getattr(args, "codex_config_dir", None),
+            use_claude_code_config=not getattr(args, "no_claude_code_config", False),
+            claude_config_dir=getattr(args, "claude_config_dir", None),
         )
     raise ValueError(f"Unsupported provider: {provider}")
 
@@ -146,6 +155,12 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument("--model")
     parser.add_argument("--max-tokens", type=int, default=1024)
     parser.add_argument("--system", default="")
+    parser.add_argument("--codex-config-dir")
+    parser.add_argument(
+        "--no-codex-config",
+        action="store_true",
+        help="Do not load env values from local Codex config.",
+    )
     parser.add_argument("--claude-config-dir")
     parser.add_argument(
         "--no-claude-code-config",

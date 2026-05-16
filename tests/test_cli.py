@@ -61,6 +61,8 @@ class CliTest(unittest.TestCase):
             )
             args = Namespace(
                 provider="auto",
+                no_codex_config=True,
+                codex_config_dir=None,
                 no_claude_code_config=False,
                 claude_config_dir=str(config_dir),
             )
@@ -69,10 +71,43 @@ class CliTest(unittest.TestCase):
 
         self.assertEqual(provider, "anthropic")
 
+    def test_auto_provider_prefers_codex_config(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            codex_dir = base / "codex"
+            claude_dir = base / "claude"
+            codex_dir.mkdir()
+            claude_dir.mkdir()
+            (codex_dir / "auth.json").write_text(
+                json.dumps({"OPENAI_API_KEY": "key"}),
+                encoding="utf-8",
+            )
+            (codex_dir / "config.toml").write_text(
+                'model_provider = "OpenAI"\nmodel = "gpt-from-codex"\n',
+                encoding="utf-8",
+            )
+            (claude_dir / "settings.json").write_text(
+                json.dumps({"env": {"ANTHROPIC_AUTH_TOKEN": "token"}}),
+                encoding="utf-8",
+            )
+            args = Namespace(
+                provider="auto",
+                no_codex_config=False,
+                codex_config_dir=str(codex_dir),
+                no_claude_code_config=False,
+                claude_config_dir=str(claude_dir),
+            )
+
+            provider = resolve_provider(args, environ={})
+
+        self.assertEqual(provider, "openai")
+
     def test_auto_provider_falls_back_to_echo_without_credentials(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             args = Namespace(
                 provider="auto",
+                no_codex_config=True,
+                codex_config_dir=None,
                 no_claude_code_config=False,
                 claude_config_dir=tmp,
             )
