@@ -44,3 +44,4 @@ Thumbs.db
 # Claude/Codex local state, if copied into the project
 .claude/
 .codex/
+.harness/
